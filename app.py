@@ -1,0 +1,230 @@
+import cv2
+import os
+from flask import Flask,request,render_template
+from datetime import date
+from datetime import datetime
+import numpy as np
+from sklearn.neighbors import KNeighborsClassifier
+import pandas as pd
+import joblib
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import Table, TableStyle
+
+
+#### Defining Flask App
+app = Flask(__name__)
+
+
+#### Saving Date today in 2 different formats
+datetoday = date.today().strftime("%m_%d_%y")
+datetoday2 = date.today().strftime("%d-%B-%Y")
+
+
+#### Initializing VideoCapture object to access WebCam
+face_detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+try:
+    cap = cv2.VideoCapture(1)
+except:
+    cap = cv2.VideoCapture(0)
+
+
+#### If these directories don't exist, create them
+if not os.path.isdir('Attendance'):
+    os.makedirs('Attendance')
+if not os.path.isdir('static'):
+    os.makedirs('static')
+if not os.path.isdir('static/faces'):
+    os.makedirs('static/faces')
+if f'Attendance-{datetoday}.csv' not in os.listdir('Attendance'):
+    with open(f'Attendance/Attendance-{datetoday}.csv','w') as f:
+        f.write('Name,Roll,Time')
+
+
+#### get a number of total registered users
+def totalreg():
+    return len(os.listdir('static/faces'))
+
+
+#### extract the face from an image
+def extract_faces(img):
+    if img!=[]:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        face_points = face_detector.detectMultiScale(gray, 1.3, 5)
+        return face_points
+    else:
+        return []
+
+#### Identify face using ML model
+def identify_face(facearray):
+    model = joblib.load('static/face_recognition_model.pkl')
+    return model.predict(facearray)
+
+
+#### A function which trains the model on all the faces available in faces folder
+def train_model():
+    faces = []
+    labels = []
+    userlist = os.listdir('static/faces')
+    for user in userlist:
+        for imgname in os.listdir(f'static/faces/{user}'):
+            img = cv2.imread(f'static/faces/{user}/{imgname}')
+            
+            # perform image augmentation
+            flip = random.randint(0, 1)
+            if flip:
+                img = cv2.flip(img, 1)
+            angle = random.uniform(-15, 15)
+            scale = random.uniform(0.8, 1.2)
+            rotation_matrix = cv2.getRotationMatrix2D((img.shape[1] / 2, img.shape[0] / 2), angle, scale)
+            img = cv2.warpAffine(img, rotation_matrix, (img.shape[1], img.shape[0]))
+            
+            resized_face = cv2.resize(img, (50, 50))
+            faces.append(resized_face.ravel())
+            labels.append(user)
+    faces = np.array(faces)
+    knn = KNeighborsClassifier(n_neighbors=5)
+    knn.fit(faces,labels)
+    joblib.dump(knn,'static/face_recognition_model.pkl')
+
+
+
+#### Extract info from today's attendance file in attendance folder
+def extract_attendance(datetoday):
+    df = pd.read_csv(f'Attendance/Attendance-{datetoday}.csv')
+    names = df['Name']
+    rolls = df['Roll']
+    times = df['Time']
+    l = len(df)
+
+    # Create a PDF report
+    pdf_filename = f'Attendance/Attendance-{datetoday}.pdf'
+    c = canvas.Canvas(pdf_filename, pagesize=letter)
+
+    # Set font size and calculate width of the canvas
+    c.setFontSize(20)
+    width, height = letter
+    text_width = c.stringWidth('Attendance Report')
+
+    # Draw the heading centered and bold on the page
+    c.setFont('Helvetica-Bold', 20)
+    c.drawCentredString(width / 2, 750, 'Attendance Report')
+
+    # Create table data
+    table_data = [['S.no', 'Name', 'Roll', 'Time']]
+    for i in range(l):
+        table_data.append([i+1, names[i], rolls[i], times[i]])
+
+    # Set column widths
+    col_widths = [40, 120, 80, 120]
+
+    # Create table and set its style
+    table = Table(table_data, colWidths=col_widths)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), '#D4E6F1'),
+        ('TEXTCOLOR', (0, 0), (-1, 0), '#000000'),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), '#F2F2F2'),
+        ('TEXTCOLOR', (0, 1), (-1, -1), '#000000'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+    ]))
+
+    # Draw the table centered on the page
+    table.wrapOn(c, width, height)
+    table.drawOn(c, (width - sum(col_widths)) / 2, 650)
+
+    c.save()
+
+    # Return attendance data
+    return names, rolls, times, l
+
+#### Add Attendance of a specific user
+def add_attendance(name):
+    username = name.split('_')[0]
+    userid = name.split('_')[1]
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
+    df = pd.read_csv(f'Attendance/Attendance-{datetoday}.csv')
+    if int(userid) not in list(df['Roll']):
+        with open(f'Attendance/Attendance-{datetoday}.csv','a') as f:
+            f.write(f'\n{username},{userid},{current_time}')
+
+
+################## ROUTING FUNCTIONS #########################
+
+#### Our main page
+@app.route('/')
+def home():
+    names,rolls,times,l = extract_attendance(datetoday)    
+    return render_template('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2) 
+
+
+#### This function will run when we click on Take Attendance Button
+@app.route('/start',methods=['GET'])
+def start():
+    if 'face_recognition_model.pkl' not in os.listdir('static'):
+        return render_template('home.html',totalreg=totalreg(),datetoday2=datetoday2,mess='There is no trained model in the static folder. Please add a new face to continue.') 
+
+    cap = cv2.VideoCapture(0)
+    ret = True
+    while ret:
+        ret,frame = cap.read()
+        if extract_faces(frame)!=():
+            (x,y,w,h) = extract_faces(frame)[0]
+            cv2.rectangle(frame,(x, y), (x+w, y+h), (255, 0, 20), 2)
+            face = cv2.resize(frame[y:y+h,x:x+w], (50, 50))
+            identified_person = identify_face(face.reshape(1,-1))[0]
+            add_attendance(identified_person)
+            cv2.putText(frame,f'{identified_person}',(30,30),cv2.FONT_HERSHEY_SIMPLEX,1,(255, 0, 20),2,cv2.LINE_AA)
+        cv2.imshow('Attendance',frame)
+        if cv2.waitKey(1)==27:
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+    names,rolls,times,l = extract_attendance(datetoday)    
+    return render_template('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2) 
+
+
+#### This function will run when we add a new user
+@app.route('/add',methods=['GET','POST'])
+def add():
+    newusername = request.form['newusername']
+    newuserid = request.form['newuserid']
+    userimagefolder = 'static/faces/'+newusername+'_'+str(newuserid)
+    if not os.path.isdir(userimagefolder):
+        os.makedirs(userimagefolder)
+    cap = cv2.VideoCapture(0)
+    i,j = 0,0
+    while 1:
+        _,frame = cap.read()
+        faces = extract_faces(frame)
+        for (x,y,w,h) in faces:
+            cv2.rectangle(frame,(x, y), (x+w, y+h), (255, 0, 20), 2)
+            cv2.putText(frame,f'Images Captured: {i}/50',(30,30),cv2.FONT_HERSHEY_SIMPLEX,1,(255, 0, 20),2,cv2.LINE_AA)
+            if j%10==0:
+                name = newusername+'_'+str(i)+'.jpg'
+                cv2.imwrite(userimagefolder+'/'+name,frame[y:y+h,x:x+w])
+                i+=1
+            j+=1
+        if j==500:
+            break
+        cv2.imshow('Adding new User',frame)
+        if cv2.waitKey(1)==27:
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+    print('Training Model')
+    train_model()
+    names,rolls,times,l = extract_attendance(datetoday)    
+    return render_template('home.html',names=names,rolls=rolls,times=times,l=l,totalreg=totalreg(),datetoday2=datetoday2) 
+
+
+#### Our main function which runs the Flask App
+if __name__ == '__main__':
+    app.run(debug=True)
